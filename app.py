@@ -41,46 +41,32 @@ uploaded_file = st.file_uploader(
 def analyze_audio(audio_path):
     """Analiza el audio usando librosa desde un archivo temporal"""
     try:
-        # Cargar audio desde archivo temporal
         y, sr = librosa.load(audio_path, sr=16000, mono=True)
-        
-        # Calcular volumen
         volume = np.abs(y)
         if np.max(volume) > 0:
             volume = volume / np.max(volume)
-        
-        # Detectar voz
         is_speech = volume > sensitivity
-        
-        # Calcular puntos de zoom con suavizado
         zoom_profile = []
         current_zoom = 1.0
         window_size = max(100, int(5000 * smoothness))
-        
         for i in range(0, len(is_speech), window_size):
             window = is_speech[i:i+window_size]
             if len(window) == 0:
                 continue
-                
-            if np.mean(window) > 0.3:  # Segmento con voz
+            if np.mean(window) > 0.3:
                 target_zoom = zoom_intensity
-            else:  # Silencio
+            else:
                 target_zoom = 1.0
-                
-            # Transición suave
             current_zoom += (target_zoom - current_zoom) * 0.1
             zoom_profile.append(current_zoom)
-        
         return zoom_profile
-        
     except Exception as e:
         st.error(f"Error en análisis de audio: {str(e)}")
-        return [1.0] * 100  # Perfil plano como respaldo
+        return [1.0] * 100
 
 def extract_audio(input_path, output_path):
     """Extrae audio usando FFmpeg de forma segura"""
     try:
-        # Usar subprocess para ejecutar FFmpeg
         command = [
             'ffmpeg',
             '-y',
@@ -90,18 +76,15 @@ def extract_audio(input_path, output_path):
             '-acodec', 'pcm_s16le',
             output_path
         ]
-        
         result = subprocess.run(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
         )
-        
         if result.returncode != 0:
             st.error(f"Error extrayendo audio: {result.stderr}")
             return False
-        
         return True
     except Exception as e:
         st.error(f"Error ejecutando FFmpeg: {str(e)}")
@@ -110,33 +93,20 @@ def extract_audio(input_path, output_path):
 def process_video(input_path, output_path, zoom_profile):
     """Procesa el video con calidad mejorada"""
     try:
-        # Cargar video con moviepy
         video_clip = VideoFileClip(input_path)
         fps = video_clip.fps
         total_frames = int(video_clip.duration * fps)
-        
-        # Calcular fps del perfil de zoom
         zoom_fps = len(zoom_profile) / video_clip.duration
-        
-        # Procesar frames
         processed_frames = []
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
         for i, frame in enumerate(video_clip.iter_frames()):
-            # Actualizar progreso
             if i % 10 == 0:
                 progress = i / total_frames
                 progress_bar.progress(progress)
                 status_text.text(f"Procesando frame {i}/{total_frames}...")
-            
-            # Obtener nivel de zoom
             zoom_level = zoom_profile[min(int(i / fps * zoom_fps), len(zoom_profile)-1)]
-            
-            # Convertir a imagen PIL
             img = Image.fromarray(frame)
-            
-            # Aplicar zoom
             if zoom_level > 1.0:
                 width, height = img.size
                 new_width, new_height = int(width / zoom_level), int(height / zoom_level)
@@ -144,18 +114,10 @@ def process_video(input_path, output_path, zoom_profile):
                 top = (height - new_height) // 2
                 img = img.crop((left, top, left + new_width, top + new_height))
                 img = img.resize((width, height), Image.LANCZOS)
-            
-            # Convertir de nuevo a array
             processed_frames.append(np.array(img))
-        
-        # Crear nuevo clip
         processed_clip = ImageSequenceClip(processed_frames, fps=fps)
-        
-        # Mantener el audio original
         if video_clip.audio:
             processed_clip = processed_clip.set_audio(video_clip.audio)
-        
-        # Exportar
         processed_clip.write_videofile(
             output_path,
             codec='libx264',
@@ -165,55 +127,47 @@ def process_video(input_path, output_path, zoom_profile):
             threads=4,
             logger=None
         )
-        
-        # Limpiar
         video_clip.close()
         processed_clip.close()
         progress_bar.empty()
         status_text.empty()
-        
         return True
-        
     except Exception as e:
         st.error(f"Error procesando video: {str(e)}")
         return False
 
 if uploaded_file is not None:
-    st.video(uploaded_file)
-    
+    # Leer video en memoria
+    video_bytes = uploaded_file.read()
+
+    # Guardar archivo temporal para mostrarlo y procesarlo
+    temp_preview_path = os.path.join(tempfile.gettempdir(), f"preview_{uploaded_file.name}")
+    with open(temp_preview_path, "wb") as f:
+        f.write(video_bytes)
+
+    # Mostrar el video
+    st.video(temp_preview_path)
+
     if st.button("✨ Procesar Video", type="primary", use_container_width=True):
         start_time = time.time()
-        
         with st.spinner('Preparando...'):
-            # Crear archivos temporales
             temp_dir = tempfile.mkdtemp()
             input_path = os.path.join(temp_dir, "input.mp4")
             audio_path = os.path.join(temp_dir, "audio.wav")
             output_path = os.path.join(temp_dir, f"procesado_{uploaded_file.name}")
-            
-            # Guardar video subido
             with open(input_path, "wb") as f:
-                f.write(uploaded_file.getvalue())
-        
+                f.write(video_bytes)
+
         try:
-            # Paso 1: Extraer audio
             if not extract_audio(input_path, audio_path):
                 st.error("Error extrayendo audio")
                 st.stop()
-            
-            # Paso 2: Analizar audio
             zoom_profile = analyze_audio(audio_path)
-            
-            # Paso 3: Procesar video
             st.info("Procesando video... Esto puede tomar varios minutos")
             if process_video(input_path, output_path, zoom_profile):
                 processing_time = time.time() - start_time
-                
-                # Mostrar resultados
                 st.success(f"✅ Procesado en {processing_time:.1f} segundos")
                 st.video(output_path)
-                
-                # Botón de descarga
                 with open(output_path, "rb") as f:
                     st.download_button(
                         "⬇️ Descargar Video Procesado",
@@ -223,9 +177,7 @@ if uploaded_file is not None:
                     )
             else:
                 st.error("Error procesando el video")
-        
         finally:
-            # Limpieza garantizada
             for file in [input_path, audio_path, output_path]:
                 if os.path.exists(file):
                     os.unlink(file)
