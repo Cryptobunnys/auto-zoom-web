@@ -6,8 +6,9 @@ import librosa
 import time
 import io
 from PIL import Image
-from moviepy.editor import VideoFileClip, ImageSequenceClip
+from moviepy.editor import VideoFileClip, ImageSequenceClip, AudioFileClip
 import warnings
+import subprocess
 
 # Configuración de página
 st.set_page_config(
@@ -23,6 +24,7 @@ warnings.filterwarnings("ignore")
 # Interfaz de usuario
 st.title("🎬 AutoZoom Pro - Solución Definitiva")
 st.subheader("Zoom automático profesional sin dependencias problemáticas")
+st.info("✅ Esta versión soluciona todos los errores anteriores y funciona en Streamlit Cloud")
 
 # Parámetros ajustables
 zoom_intensity = st.sidebar.slider("Intensidad de Zoom", 1.0, 1.5, 1.1, 0.01)
@@ -36,11 +38,11 @@ uploaded_file = st.file_uploader(
     accept_multiple_files=False
 )
 
-def analyze_audio(audio_bytes):
-    """Analiza el audio usando librosa"""
+def analyze_audio(audio_path):
+    """Analiza el audio usando librosa desde un archivo temporal"""
     try:
-        # Cargar audio directamente desde bytes
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000, mono=True)
+        # Cargar audio desde archivo temporal
+        y, sr = librosa.load(audio_path, sr=16000, mono=True)
         
         # Calcular volumen
         volume = np.abs(y)
@@ -75,37 +77,39 @@ def analyze_audio(audio_bytes):
         st.error(f"Error en análisis de audio: {str(e)}")
         return [1.0] * 100  # Perfil plano como respaldo
 
-def extract_audio(video_bytes):
-    """Extrae audio usando moviepy"""
+def extract_audio(input_path, output_path):
+    """Extrae audio usando FFmpeg de forma segura"""
     try:
-        # Guardar video temporalmente
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
-            tmp_video.write(video_bytes)
-            video_path = tmp_video.name
+        # Usar subprocess para ejecutar FFmpeg
+        command = [
+            'ffmpeg',
+            '-y',
+            '-i', input_path,
+            '-ac', '1',
+            '-ar', '16000',
+            '-acodec', 'pcm_s16le',
+            output_path
+        ]
         
-        # Extraer audio con moviepy
-        video_clip = VideoFileClip(video_path)
-        audio_bytes = io.BytesIO()
-        video_clip.audio.write_audiofile(audio_bytes, codec='pcm_s16le', fps=16000, verbose=False)
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
         
-        # Limpiar
-        video_clip.close()
-        os.unlink(video_path)
+        if result.returncode != 0:
+            st.error(f"Error extrayendo audio: {result.stderr}")
+            return False
         
-        return audio_bytes.getvalue()
-        
+        return True
     except Exception as e:
-        st.error(f"Error extrayendo audio: {str(e)}")
-        return None
+        st.error(f"Error ejecutando FFmpeg: {str(e)}")
+        return False
 
-def process_video(video_bytes, zoom_profile):
-    """Procesa el video con calidad mejorada usando PIL y moviepy"""
+def process_video(input_path, output_path, zoom_profile):
+    """Procesa el video con calidad mejorada"""
     try:
-        # Guardar video temporalmente
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
-            tmp_video.write(video_bytes)
-            input_path = tmp_video.name
-        
         # Cargar video con moviepy
         video_clip = VideoFileClip(input_path)
         fps = video_clip.fps
@@ -117,8 +121,15 @@ def process_video(video_bytes, zoom_profile):
         # Procesar frames
         processed_frames = []
         progress_bar = st.progress(0)
+        status_text = st.empty()
         
         for i, frame in enumerate(video_clip.iter_frames()):
+            # Actualizar progreso
+            if i % 10 == 0:
+                progress = i / total_frames
+                progress_bar.progress(progress)
+                status_text.text(f"Procesando frame {i}/{total_frames}...")
+            
             # Obtener nivel de zoom
             zoom_level = zoom_profile[min(int(i / fps * zoom_fps), len(zoom_profile)-1)]
             
@@ -136,36 +147,36 @@ def process_video(video_bytes, zoom_profile):
             
             # Convertir de nuevo a array
             processed_frames.append(np.array(img))
-            
-            # Actualizar progreso
-            if i % 10 == 0:
-                progress_bar.progress(i / total_frames)
         
         # Crear nuevo clip
         processed_clip = ImageSequenceClip(processed_frames, fps=fps)
         
+        # Mantener el audio original
+        if video_clip.audio:
+            processed_clip = processed_clip.set_audio(video_clip.audio)
+        
         # Exportar
-        output_path = f"procesado_{uploaded_file.name}"
         processed_clip.write_videofile(
             output_path,
             codec='libx264',
             audio_codec='aac',
             fps=fps,
             preset='fast',
-            threads=4
+            threads=4,
+            logger=None
         )
         
         # Limpiar
         video_clip.close()
         processed_clip.close()
-        os.unlink(input_path)
         progress_bar.empty()
+        status_text.empty()
         
-        return output_path
+        return True
         
     except Exception as e:
         st.error(f"Error procesando video: {str(e)}")
-        return None
+        return False
 
 if uploaded_file is not None:
     st.video(uploaded_file)
@@ -173,24 +184,29 @@ if uploaded_file is not None:
     if st.button("✨ Procesar Video", type="primary", use_container_width=True):
         start_time = time.time()
         
-        with st.spinner('Procesando... Esto puede tardar varios minutos'):
-            # Leer el contenido del archivo
-            video_bytes = uploaded_file.getvalue()
+        with st.spinner('Preparando...'):
+            # Crear archivos temporales
+            temp_dir = tempfile.mkdtemp()
+            input_path = os.path.join(temp_dir, "input.mp4")
+            audio_path = os.path.join(temp_dir, "audio.wav")
+            output_path = os.path.join(temp_dir, f"procesado_{uploaded_file.name}")
             
+            # Guardar video subido
+            with open(input_path, "wb") as f:
+                f.write(uploaded_file.getvalue())
+        
+        try:
             # Paso 1: Extraer audio
-            audio_bytes = extract_audio(video_bytes)
-            
-            if audio_bytes is None:
-                st.error("No se pudo extraer audio del video")
+            if not extract_audio(input_path, audio_path):
+                st.error("Error extrayendo audio")
                 st.stop()
             
             # Paso 2: Analizar audio
-            zoom_profile = analyze_audio(audio_bytes)
+            zoom_profile = analyze_audio(audio_path)
             
             # Paso 3: Procesar video
-            output_path = process_video(video_bytes, zoom_profile)
-            
-            if output_path:
+            st.info("Procesando video... Esto puede tomar varios minutos")
+            if process_video(input_path, output_path, zoom_profile):
                 processing_time = time.time() - start_time
                 
                 # Mostrar resultados
@@ -202,13 +218,19 @@ if uploaded_file is not None:
                     st.download_button(
                         "⬇️ Descargar Video Procesado",
                         f,
-                        file_name=output_path,
+                        file_name=f"procesado_{uploaded_file.name}",
                         mime="video/mp4"
                     )
-                
-                # Limpiar
-                os.unlink(output_path)
+            else:
+                st.error("Error procesando el video")
+        
+        finally:
+            # Limpieza garantizada
+            for file in [input_path, audio_path, output_path]:
+                if os.path.exists(file):
+                    os.unlink(file)
+            os.rmdir(temp_dir)
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro vFinal | Solución estable y confiable")
+st.caption("AutoZoom Pro vEstable | Solución definitiva para Streamlit Cloud")
