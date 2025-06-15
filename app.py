@@ -8,8 +8,9 @@ from moviepy.editor import VideoFileClip
 import warnings
 import io
 import time
-import av
 import imageio
+from scipy.io import wavfile
+import cv2
 
 # Configuración de página
 st.set_page_config(
@@ -73,26 +74,33 @@ def analyze_audio(audio_bytes):
         return np.ones(100)  # Perfil plano como respaldo
 
 def extract_audio(video_bytes):
-    """Extrae audio usando PyAV (sin dependencias externas)"""
+    """Extrae audio usando moviepy (sin dependencias externas)"""
     try:
-        with av.open(io.BytesIO(video_bytes)) as container:
-            audio_stream = next(s for s in container.streams if s.type == 'audio')
-            frames = []
-            
-            for packet in container.demux(audio_stream):
-                for frame in packet.decode():
-                    frames.append(frame.to_ndarray())
-            
-            if len(frames) > 0:
-                audio = np.concatenate(frames)
-                if audio.ndim > 1:  # Convertir a mono si es estéreo
-                    audio = np.mean(audio, axis=1)
-                
-                # Guardar como WAV en memoria
-                buffer = io.BytesIO()
-                sf.write(buffer, audio, 16000, format='WAV')
-                return buffer.getvalue()
-                
+        # Guardar video temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+            tmp_video.write(video_bytes)
+            video_path = tmp_video.name
+        
+        # Extraer audio con moviepy
+        video_clip = VideoFileClip(video_path)
+        audio_clip = video_clip.audio
+        
+        # Guardar audio temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
+            audio_path = tmp_audio.name
+            audio_clip.write_audiofile(audio_path, fps=16000)
+        
+        # Leer audio como bytes
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+        
+        # Limpiar
+        video_clip.close()
+        os.unlink(video_path)
+        os.unlink(audio_path)
+        
+        return audio_bytes
+        
     except Exception as e:
         st.error(f"Error extrayendo audio: {str(e)}")
         return None
@@ -100,40 +108,40 @@ def extract_audio(video_bytes):
 def enhance_video(input_path, output_path, zoom_profile):
     """Procesa el video con calidad mejorada"""
     try:
-        # Cargar video con imageio para mejor rendimiento
+        # Cargar video con imageio
         reader = imageio.get_reader(input_path)
         fps = reader.get_meta_data()['fps']
+        frame_count = 0
         
         # Configurar writer para máxima calidad
         writer = imageio.get_writer(
             output_path,
             fps=fps,
-            quality=10,  # Máxima calidad
+            quality=10,
             codec='libx264',
             pixelformat='yuv420p'
         )
         
         # Calcular fps del perfil de zoom
-        zoom_fps = len(zoom_profile) / reader.get_length()
+        zoom_fps = len(zoom_profile) / reader.count_frames()
         
-        for i, frame in enumerate(reader):
+        for frame in reader:
             # Aplicar zoom
-            zoom_level = zoom_profile[min(int(i * zoom_fps), len(zoom_profile)-1)]
+            zoom_level = zoom_profile[min(int(frame_count * zoom_fps), len(zoom_profile)-1)]
             
             # Mejorar contraste (opcional)
-            frame = frame.astype(np.float32)
-            frame = (frame - np.min(frame)) / (np.max(frame) - np.min(frame)) * 255
-            frame = frame.astype(np.uint8)
+            frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
             
             # Aplicar transformación de zoom
             if zoom_level != 1.0:
                 h, w = frame.shape[:2]
                 new_h, new_w = int(h/zoom_level), int(w/zoom_level)
                 start_h, start_w = (h - new_h) // 2, (w - new_w) // 2
-                frame = frame[start_h:start_h+new_h, start_w:start_w+new_w]
-                frame = cv2.resize(frame, (w, h)) if zoom_level > 1.0 else frame
+                cropped = frame[start_h:start_h+new_h, start_w:start_w+new_w]
+                frame = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LANCZOS4)
             
             writer.append_data(frame)
+            frame_count += 1
             
         writer.close()
         reader.close()
@@ -191,4 +199,4 @@ if uploaded_file is not None:
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v8.0 | Calidad profesional sin complicaciones")
+st.caption("AutoZoom Pro v9.0 | Calidad profesional sin dependencias problemáticas")
