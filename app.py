@@ -3,39 +3,26 @@ import numpy as np
 import tempfile
 import os
 import librosa
-from moviepy.editor import VideoFileClip
-import warnings
 import time
-import cv2
-from pydub import AudioSegment
 import io
-
-# Solución para error de pyaudioop
-try:
-    import pyaudioop
-except ImportError:
-    pass
+from PIL import Image
+from moviepy.editor import VideoFileClip, ImageSequenceClip
+import warnings
 
 # Configuración de página
 st.set_page_config(
     page_title="🎬 AutoZoom Pro",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # Ocultar warnings
 warnings.filterwarnings("ignore")
 
 # Interfaz de usuario
-st.title("🎬 AutoZoom Pro - Editor Inteligente")
-st.subheader("Zoom automático profesional basado en tu voz")
-st.markdown("""
-<style>
-.stProgress > div > div > div > div {
-    background-color: #4CAF50;
-}
-</style>
-""", unsafe_allow_html=True)
+st.title("🎬 AutoZoom Pro - Solución Definitiva")
+st.subheader("Zoom automático profesional sin dependencias problemáticas")
 
 # Parámetros ajustables
 zoom_intensity = st.sidebar.slider("Intensidad de Zoom", 1.0, 1.5, 1.1, 0.01)
@@ -44,8 +31,8 @@ smoothness = st.sidebar.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
 
 # Subida de archivos
 uploaded_file = st.file_uploader(
-    "Sube tu video (MP4, MOV, AVI)",
-    type=["mp4", "mov", "avi"],
+    "Sube tu video (MP4)",
+    type=["mp4"],
     accept_multiple_files=False
 )
 
@@ -55,21 +42,21 @@ def analyze_audio(audio_bytes):
         # Cargar audio directamente desde bytes
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000, mono=True)
         
-        # Calcular volumen normalizado
+        # Calcular volumen
         volume = np.abs(y)
-        if volume.max() > 0:
-            volume = volume / volume.max()
+        if np.max(volume) > 0:
+            volume = volume / np.max(volume)
         
-        # Detección de voz adaptativa
+        # Detectar voz
         is_speech = volume > sensitivity
         
-        # Suavizado inteligente
+        # Calcular puntos de zoom con suavizado
         zoom_profile = []
         current_zoom = 1.0
-        transition_speed = 0.05 * (1/smoothness)
+        window_size = max(100, int(5000 * smoothness))
         
-        for i in range(0, len(is_speech), 1000):
-            window = is_speech[i:i+1000]
+        for i in range(0, len(is_speech), window_size):
+            window = is_speech[i:i+window_size]
             if len(window) == 0:
                 continue
                 
@@ -78,7 +65,8 @@ def analyze_audio(audio_bytes):
             else:  # Silencio
                 target_zoom = 1.0
                 
-            current_zoom += (target_zoom - current_zoom) * transition_speed
+            # Transición suave
+            current_zoom += (target_zoom - current_zoom) * 0.1
             zoom_profile.append(current_zoom)
         
         return zoom_profile
@@ -87,22 +75,22 @@ def analyze_audio(audio_bytes):
         st.error(f"Error en análisis de audio: {str(e)}")
         return [1.0] * 100  # Perfil plano como respaldo
 
-def extract_audio_from_video(video_bytes):
-    """Extrae audio usando Pydub"""
+def extract_audio(video_bytes):
+    """Extrae audio usando moviepy"""
     try:
-        # Crear archivo temporal en memoria
-        video_file = io.BytesIO(video_bytes)
-        video_file.name = "temp_video.mp4"
+        # Guardar video temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+            tmp_video.write(video_bytes)
+            video_path = tmp_video.name
         
-        # Cargar video con Pydub
-        audio = AudioSegment.from_file(video_file, format="mp4")
-        
-        # Convertir a mono y 16kHz
-        audio = audio.set_channels(1).set_frame_rate(16000)
-        
-        # Exportar a bytes
+        # Extraer audio con moviepy
+        video_clip = VideoFileClip(video_path)
         audio_bytes = io.BytesIO()
-        audio.export(audio_bytes, format="wav")
+        video_clip.audio.write_audiofile(audio_bytes, codec='pcm_s16le', fps=16000, verbose=False)
+        
+        # Limpiar
+        video_clip.close()
+        os.unlink(video_path)
         
         return audio_bytes.getvalue()
         
@@ -110,60 +98,74 @@ def extract_audio_from_video(video_bytes):
         st.error(f"Error extrayendo audio: {str(e)}")
         return None
 
-def process_video(input_path, output_path, zoom_profile):
-    """Procesa el video con el perfil de zoom"""
+def process_video(video_bytes, zoom_profile):
+    """Procesa el video con calidad mejorada usando PIL y moviepy"""
     try:
-        # Cargar video con OpenCV
-        cap = cv2.VideoCapture(input_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Guardar video temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+            tmp_video.write(video_bytes)
+            input_path = tmp_video.name
         
-        # Configurar writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        frame_count = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        progress_bar = st.progress(0)
+        # Cargar video con moviepy
+        video_clip = VideoFileClip(input_path)
+        fps = video_clip.fps
+        total_frames = int(video_clip.duration * fps)
         
         # Calcular fps del perfil de zoom
-        zoom_fps = len(zoom_profile) / (total_frames / fps)
+        zoom_fps = len(zoom_profile) / video_clip.duration
         
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
+        # Procesar frames
+        processed_frames = []
+        progress_bar = st.progress(0)
+        
+        for i, frame in enumerate(video_clip.iter_frames()):
             # Obtener nivel de zoom
-            zoom_level = zoom_profile[min(int(frame_count * zoom_fps), len(zoom_profile)-1)]
+            zoom_level = zoom_profile[min(int(i / fps * zoom_fps), len(zoom_profile)-1)]
+            
+            # Convertir a imagen PIL
+            img = Image.fromarray(frame)
             
             # Aplicar zoom
             if zoom_level > 1.0:
-                h, w = frame.shape[:2]
-                new_h, new_w = int(h/zoom_level), int(w/zoom_level)
-                start_h, start_w = (h - new_h) // 2, (w - new_w) // 2
-                frame = frame[start_h:start_h+new_h, start_w:start_w+new_w]
-                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LANCZOS4)
+                width, height = img.size
+                new_width, new_height = int(width / zoom_level), int(height / zoom_level)
+                left = (width - new_width) // 2
+                top = (height - new_height) // 2
+                img = img.crop((left, top, left + new_width, top + new_height))
+                img = img.resize((width, height), Image.LANCZOS)
             
-            # Escribir frame
-            out.write(frame)
-            frame_count += 1
+            # Convertir de nuevo a array
+            processed_frames.append(np.array(img))
             
             # Actualizar progreso
-            if frame_count % 10 == 0:
-                progress_bar.progress(frame_count / total_frames)
+            if i % 10 == 0:
+                progress_bar.progress(i / total_frames)
         
-        # Liberar recursos
-        cap.release()
-        out.release()
-        cv2.destroyAllWindows()
+        # Crear nuevo clip
+        processed_clip = ImageSequenceClip(processed_frames, fps=fps)
+        
+        # Exportar
+        output_path = f"procesado_{uploaded_file.name}"
+        processed_clip.write_videofile(
+            output_path,
+            codec='libx264',
+            audio_codec='aac',
+            fps=fps,
+            preset='fast',
+            threads=4
+        )
+        
+        # Limpiar
+        video_clip.close()
+        processed_clip.close()
+        os.unlink(input_path)
         progress_bar.empty()
-        return True
+        
+        return output_path
         
     except Exception as e:
         st.error(f"Error procesando video: {str(e)}")
-        return False
+        return None
 
 if uploaded_file is not None:
     st.video(uploaded_file)
@@ -172,54 +174,41 @@ if uploaded_file is not None:
         start_time = time.time()
         
         with st.spinner('Procesando... Esto puede tardar varios minutos'):
-            # Leer el contenido del archivo subido
+            # Leer el contenido del archivo
             video_bytes = uploaded_file.getvalue()
             
             # Paso 1: Extraer audio
-            audio_bytes = extract_audio_from_video(video_bytes)
+            audio_bytes = extract_audio(video_bytes)
             
             if audio_bytes is None:
-                st.error("Error al extraer audio del video")
+                st.error("No se pudo extraer audio del video")
                 st.stop()
             
             # Paso 2: Analizar audio
             zoom_profile = analyze_audio(audio_bytes)
             
-            # Crear archivo temporal para video
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
-                tmp_video.write(video_bytes)
-                input_path = tmp_video.name
-            
             # Paso 3: Procesar video
-            output_path = "procesado_" + uploaded_file.name
+            output_path = process_video(video_bytes, zoom_profile)
             
-            try:
-                success = process_video(input_path, output_path, zoom_profile)
+            if output_path:
+                processing_time = time.time() - start_time
                 
-                if success:
-                    processing_time = time.time() - start_time
-                    st.success(f"✅ ¡Video procesado con éxito en {processing_time:.1f} segundos!")
-                    
-                    # Mostrar video resultante
-                    st.video(output_path)
-                    
-                    # Botón de descarga
-                    with open(output_path, "rb") as f:
-                        st.download_button(
-                            "⬇️ Descargar Video Procesado",
-                            f,
-                            file_name=output_path,
-                            mime="video/mp4"
-                        )
-                else:
-                    st.error("Error procesando el video. Intenta con otro archivo.")
-            
-            finally:
-                # Limpiar archivos temporales
-                os.unlink(input_path)
-                if os.path.exists(output_path):
-                    os.unlink(output_path)
+                # Mostrar resultados
+                st.success(f"✅ Procesado en {processing_time:.1f} segundos")
+                st.video(output_path)
+                
+                # Botón de descarga
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        "⬇️ Descargar Video Procesado",
+                        f,
+                        file_name=output_path,
+                        mime="video/mp4"
+                    )
+                
+                # Limpiar
+                os.unlink(output_path)
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v11.0 | Solución robusta y confiable")
+st.caption("AutoZoom Pro vFinal | Solución estable y confiable")
