@@ -3,190 +3,192 @@ import numpy as np
 import tempfile
 import os
 import librosa
-from moviepy.editor import VideoFileClip, AudioFileClip
+import soundfile as sf
+from moviepy.editor import VideoFileClip
 import warnings
 import io
-from pydub import AudioSegment
 import time
+import av
+import imageio
 
-# Configurar página
-st.set_page_config(page_title="AutoZoom Pro", page_icon="🎬", layout="wide")
-st.title("🎬 AutoZoom Pro - Zoom Automático para Videos")
-st.subheader("Sube tu video y la herramienta aplicará zooms profesionales automáticamente")
+# Configuración de página
+st.set_page_config(
+    page_title="🎬 AutoZoom Pro",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Ocultar warnings
 warnings.filterwarnings("ignore")
 
-# Subida de archivos
-uploaded_file = st.file_uploader("Sube tu video MP4", type=["mp4"], accept_multiple_files=False)
+# Interfaz de usuario
+st.title("🎬 AutoZoom Pro - Editor Inteligente")
+st.subheader("Zoom automático profesional basado en tu voz")
 
-# Parámetros ajustables
-st.sidebar.header("⚙️ Configuración de Zoom")
-zoom_intensity = st.sidebar.slider("Intensidad del Zoom", 1.0, 1.5, 1.1, 0.01)
-sensitivity = st.sidebar.slider("Sensibilidad de Voz", 0.1, 0.9, 0.3, 0.05)
-smoothness = st.sidebar.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
+with st.expander("⚙️ Configuración avanzada", expanded=True):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        zoom_intensity = st.slider("Intensidad de Zoom", 1.0, 1.5, 1.1, 0.01)
+    with col2:
+        sensitivity = st.slider("Sensibilidad de Voz", 0.1, 0.9, 0.3, 0.05)
+    with col3:
+        smoothness = st.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
+
+# Subida de archivos
+uploaded_file = st.file_uploader(
+    "Sube tu video (MP4, MOV, AVI)",
+    type=["mp4", "mov", "avi"],
+    accept_multiple_files=False
+)
 
 def analyze_audio(audio_bytes):
-    """Analiza el audio directamente desde bytes usando librosa"""
+    """Analiza el audio usando librosa"""
     try:
-        # Convertir bytes a array de audio con librosa
+        # Cargar audio directamente desde bytes
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000, mono=True)
         
-        # Calcular volumen
-        volume = np.abs(y)
-        if np.max(volume) > 0:
-            volume = volume / np.max(volume)
-        else:
-            volume = np.zeros_like(volume)
+        # Calcular volumen normalizado
+        rms = librosa.feature.rms(y=y)
+        volume = (rms - np.min(rms)) / (np.max(rms) - np.min(rms) + 1e-10)
+        volume = volume.flatten()
         
-        # Detectar voz
+        # Detección de voz adaptativa
         is_speech = volume > sensitivity
         
-        # Calcular puntos de zoom con suavizado
-        zoom_points = []
+        # Suavizado inteligente
+        zoom_profile = []
         current_zoom = 1.0
+        transition_speed = 0.05 * (1/smoothness)
         
-        # Tamaño de ventana basado en la suavidad
-        window_size = max(100, int(5000 * smoothness))
+        for speech in is_speech:
+            target_zoom = zoom_intensity if speech else 1.0
+            current_zoom += (target_zoom - current_zoom) * transition_speed
+            zoom_profile.append(current_zoom)
         
-        for i in range(0, len(is_speech), window_size):
-            window = is_speech[i:i+window_size]
-            if len(window) == 0:
-                continue
-                
-            if np.mean(window) > 0.3:  # Segmento con voz
-                current_zoom = min(zoom_intensity, current_zoom + 0.02 * (1/smoothness))
-            else:  # Silencio
-                current_zoom = max(1.0, current_zoom - 0.02 * (1/smoothness))
-                
-            zoom_points.append(current_zoom)
-        
-        return zoom_points
+        return zoom_profile
         
     except Exception as e:
         st.error(f"Error en análisis de audio: {str(e)}")
-        return [1.0] * 100  # Perfil de zoom plano como respaldo
+        return np.ones(100)  # Perfil plano como respaldo
 
-def process_video(video_path, output_path, zoom_profile):
-    """Procesa el video con el perfil de zoom"""
+def extract_audio(video_bytes):
+    """Extrae audio usando PyAV (sin dependencias externas)"""
     try:
-        # Cargar video
-        clip = VideoFileClip(video_path)
-        
-        # Calcular frames por segundo del perfil de zoom
-        zoom_fps = len(zoom_profile) / clip.duration
-        
-        # Función para aplicar zoom
-        def make_frame(get_frame, t):
-            try:
-                # Obtener nivel de zoom para este tiempo
-                idx = min(int(t * zoom_fps), len(zoom_profile)-1)
-                zoom_level = zoom_profile[idx]
-                
-                # Aplicar zoom
-                frame = get_frame(t)
-                return frame * zoom_level
-            except:
-                return get_frame(t)  # Respaldar al frame original
+        with av.open(io.BytesIO(video_bytes)) as container:
+            audio_stream = next(s for s in container.streams if s.type == 'audio')
+            frames = []
             
-        # Aplicar efecto
-        zoom_clip = clip.fl(lambda gf, t: make_frame(gf, t), apply_to=['video'])
-        
-        # Escribir video de salida
-        zoom_clip.write_videofile(
-            output_path,
-            codec='libx264',
-            audio_codec='aac',
-            fps=clip.fps,
-            threads=4,
-            preset='fast',
-            logger=None
-        )
-        
-        clip.close()
-        return True
-        
-    except Exception as e:
-        st.error(f"Error en procesamiento de video: {str(e)}")
-        return False
-
-def extract_audio_from_video(video_bytes):
-    """Extrae audio directamente desde los bytes del video usando Pydub"""
-    try:
-        # Crear archivo temporal en memoria
-        video_file = io.BytesIO(video_bytes)
-        video_file.name = "temp_video.mp4"
-        
-        # Cargar video con Pydub
-        audio = AudioSegment.from_file(video_file, format="mp4")
-        
-        # Convertir a mono y 16kHz
-        audio = audio.set_channels(1).set_frame_rate(16000)
-        
-        # Exportar a bytes
-        audio_bytes = io.BytesIO()
-        audio.export(audio_bytes, format="wav")
-        
-        return audio_bytes.getvalue()
-        
+            for packet in container.demux(audio_stream):
+                for frame in packet.decode():
+                    frames.append(frame.to_ndarray())
+            
+            if len(frames) > 0:
+                audio = np.concatenate(frames)
+                if audio.ndim > 1:  # Convertir a mono si es estéreo
+                    audio = np.mean(audio, axis=1)
+                
+                # Guardar como WAV en memoria
+                buffer = io.BytesIO()
+                sf.write(buffer, audio, 16000, format='WAV')
+                return buffer.getvalue()
+                
     except Exception as e:
         st.error(f"Error extrayendo audio: {str(e)}")
         return None
 
+def enhance_video(input_path, output_path, zoom_profile):
+    """Procesa el video con calidad mejorada"""
+    try:
+        # Cargar video con imageio para mejor rendimiento
+        reader = imageio.get_reader(input_path)
+        fps = reader.get_meta_data()['fps']
+        
+        # Configurar writer para máxima calidad
+        writer = imageio.get_writer(
+            output_path,
+            fps=fps,
+            quality=10,  # Máxima calidad
+            codec='libx264',
+            pixelformat='yuv420p'
+        )
+        
+        # Calcular fps del perfil de zoom
+        zoom_fps = len(zoom_profile) / reader.get_length()
+        
+        for i, frame in enumerate(reader):
+            # Aplicar zoom
+            zoom_level = zoom_profile[min(int(i * zoom_fps), len(zoom_profile)-1)]
+            
+            # Mejorar contraste (opcional)
+            frame = frame.astype(np.float32)
+            frame = (frame - np.min(frame)) / (np.max(frame) - np.min(frame)) * 255
+            frame = frame.astype(np.uint8)
+            
+            # Aplicar transformación de zoom
+            if zoom_level != 1.0:
+                h, w = frame.shape[:2]
+                new_h, new_w = int(h/zoom_level), int(w/zoom_level)
+                start_h, start_w = (h - new_h) // 2, (w - new_w) // 2
+                frame = frame[start_h:start_h+new_h, start_w:start_w+new_w]
+                frame = cv2.resize(frame, (w, h)) if zoom_level > 1.0 else frame
+            
+            writer.append_data(frame)
+            
+        writer.close()
+        reader.close()
+        return True
+        
+    except Exception as e:
+        st.error(f"Error procesando video: {str(e)}")
+        return False
+
 if uploaded_file is not None:
-    # Mostrar video subido
     st.video(uploaded_file)
     
-    if st.button("✨ Aplicar Zoom Automático", type="primary", use_container_width=True):
+    if st.button("✨ Procesar Video", type="primary", use_container_width=True):
         start_time = time.time()
         
-        with st.spinner('Procesando tu video... Esto puede tardar varios minutos'):
-            # Leer el contenido del archivo subido
+        with st.spinner('Procesando... Esto puede tardar varios minutos'):
+            # Paso 1: Extraer audio
             video_bytes = uploaded_file.getvalue()
-            
-            # Paso 1: Extraer audio directamente desde bytes
-            audio_bytes = extract_audio_from_video(video_bytes)
+            audio_bytes = extract_audio(video_bytes)
             
             if audio_bytes is None:
-                st.error("Error al extraer audio del video")
+                st.error("No se pudo extraer audio del video")
                 st.stop()
             
             # Paso 2: Analizar audio
             zoom_profile = analyze_audio(audio_bytes)
             
-            # Crear archivo temporal para video
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
-                tmp_video.write(video_bytes)
-                input_path = tmp_video.name
-            
             # Paso 3: Procesar video
-            output_path = "procesado_" + uploaded_file.name
-            success = process_video(input_path, output_path, zoom_profile)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_in:
+                tmp_in.write(video_bytes)
+                input_path = tmp_in.name
             
-            if success:
+            output_path = f"enhanced_{uploaded_file.name}"
+            
+            if enhance_video(input_path, output_path, zoom_profile):
                 processing_time = time.time() - start_time
-                st.success(f"✅ ¡Video procesado con éxito en {processing_time:.1f} segundos!")
                 
-                # Mostrar video resultante
+                # Mostrar resultados
+                st.success(f"✅ Procesado en {processing_time:.1f} segundos")
                 st.video(output_path)
                 
                 # Botón de descarga
                 with open(output_path, "rb") as f:
                     st.download_button(
-                        "⬇️ Descargar Video Procesado",
+                        "⬇️ Descargar Video Mejorado",
                         f,
                         file_name=output_path,
                         mime="video/mp4"
                     )
-            else:
-                st.error("Error procesando el video. Intenta con otro archivo.")
             
-            # Limpiar archivos temporales
+            # Limpieza
             os.unlink(input_path)
             if os.path.exists(output_path):
                 os.unlink(output_path)
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v7.0 | Herramienta para creadores de contenido")
-st.caption("© 2024 - Zoom automático basado en análisis de voz")
+st.caption("AutoZoom Pro v8.0 | Calidad profesional sin complicaciones")
