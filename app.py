@@ -7,7 +7,8 @@ import librosa
 import soundfile as sf
 from moviepy.editor import VideoFileClip
 import warnings
-import ffmpeg  # Importamos ffmpeg-python
+import base64
+import time
 
 # Configurar página
 st.set_page_config(page_title="AutoZoom Pro", page_icon="🎬", layout="wide")
@@ -25,6 +26,55 @@ st.sidebar.header("⚙️ Configuración de Zoom")
 zoom_intensity = st.sidebar.slider("Intensidad del Zoom", 1.0, 1.5, 1.1, 0.01)
 sensitivity = st.sidebar.slider("Sensibilidad de Voz", 0.1, 0.9, 0.3, 0.05)
 smoothness = st.sidebar.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
+
+# Solución definitiva para FFmpeg
+def install_ffmpeg():
+    """Instala FFmpeg en el entorno de Streamlit Cloud"""
+    try:
+        st.info("📥 Instalando FFmpeg... Esto puede tomar 1 minuto")
+        start_time = time.time()
+        
+        # Instalar FFmpeg usando apt-get
+        result = subprocess.run(
+            ['apt-get', 'update'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        result = subprocess.run(
+            ['apt-get', '-y', 'install', 'ffmpeg'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Verificar instalación
+        result = subprocess.run(
+            ['ffmpeg', '-version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        if "ffmpeg version" in result.stdout:
+            st.success(f"✅ FFmpeg instalado correctamente en {time.time()-start_time:.1f} segundos")
+            return True
+        else:
+            st.error(f"❌ Error instalando FFmpeg: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Error crítico: {str(e)}")
+        return False
+
+# Verificar e instalar FFmpeg si es necesario
+if not os.path.exists('/usr/bin/ffmpeg'):
+    if install_ffmpeg():
+        st.experimental_rerun()  # Reiniciar la app después de instalar
+    else:
+        st.error("No se pudo instalar FFmpeg. La aplicación no funcionará correctamente.")
+        st.stop()
 
 def analyze_audio(audio_path):
     """Analiza el audio usando librosa"""
@@ -65,7 +115,7 @@ def analyze_audio(audio_path):
         return [1.0] * 100  # Perfil de zoom plano como respaldo
 
 def process_video(input_path, output_path, zoom_profile):
-    """Procesa el video con el perfil de zoom"""
+    """Procesa el video con el perfil de zoom usando moviepy"""
     try:
         # Cargar video
         clip = VideoFileClip(input_path)
@@ -107,6 +157,22 @@ def process_video(input_path, output_path, zoom_profile):
         st.error(f"Error en procesamiento de video: {str(e)}")
         return False
 
+def extract_audio(input_path, output_path):
+    """Extrae audio usando moviepy para evitar problemas con ffmpeg"""
+    try:
+        from moviepy.audio.io.AudioFileClip import AudioFileClip
+        audio_clip = AudioFileClip(input_path)
+        audio_clip.write_audiofile(
+            output_path, 
+            fps=16000, 
+            ffmpeg_params=['-ac', '1']  # Mono
+        )
+        audio_clip.close()
+        return True
+    except Exception as e:
+        st.error(f"Error extrayendo audio: {str(e)}")
+        return False
+
 if uploaded_file is not None:
     # Mostrar video subido
     st.video(uploaded_file)
@@ -121,23 +187,8 @@ if uploaded_file is not None:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
                 audio_path = tmp_audio.name
             
-            # Extraer audio del video usando ffmpeg-python
-            try:
-                # Usamos ffmpeg-python en lugar de subprocess
-                (
-                    ffmpeg
-                    .input(input_path)
-                    .output(audio_path, ac=1, ar='16000')
-                    .run(quiet=True, overwrite_output=True)
-                )
-            except ffmpeg.Error as e:
-                st.error(f"Error extrayendo audio: {str(e.stderr.decode('utf8'))}")
-                os.unlink(input_path)
-                if os.path.exists(audio_path):
-                    os.unlink(audio_path)
-                st.stop()
-            except Exception as e:
-                st.error(f"Error inesperado: {str(e)}")
+            # Extraer audio usando moviepy
+            if not extract_audio(input_path, audio_path):
                 os.unlink(input_path)
                 if os.path.exists(audio_path):
                     os.unlink(audio_path)
@@ -154,6 +205,8 @@ if uploaded_file is not None:
                 
                 if success:
                     st.success("✅ ¡Video procesado con éxito!")
+                    
+                    # Mostrar video resultante
                     st.video(output_path)
                     
                     # Botón de descarga
@@ -176,5 +229,5 @@ if uploaded_file is not None:
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v3.0 | Herramienta para creadores de contenido")
+st.caption("AutoZoom Pro v5.0 | Herramienta para creadores de contenido")
 st.caption("© 2024 - Zoom automático basado en análisis de voz")
