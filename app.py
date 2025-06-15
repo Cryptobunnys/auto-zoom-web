@@ -1,4 +1,17 @@
-import streamlit as st
+import os
+import subprocess
+
+# Instalar dependencias del sistema
+if not os.path.exists('/usr/bin/ffmpeg'):
+    subprocess.run(['apt-get', 'update'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['apt-get', '-y', 'install', 'ffmpeg'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# Solución para pyaudioop
+try:
+    import pyaudioop
+except ImportError:
+    subprocess.run(['pip', 'install', 'pyaudioop==0.1.0'])
+    import streamlit as st
 import numpy as np
 import subprocess
 import tempfile
