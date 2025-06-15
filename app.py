@@ -1,13 +1,12 @@
 import streamlit as st
 import numpy as np
-import subprocess
 import tempfile
 import os
 import librosa
-import soundfile as sf
-from moviepy.editor import VideoFileClip
+from moviepy.editor import VideoFileClip, AudioFileClip
 import warnings
-import base64
+import io
+from pydub import AudioSegment
 import time
 
 # Configurar página
@@ -27,64 +26,18 @@ zoom_intensity = st.sidebar.slider("Intensidad del Zoom", 1.0, 1.5, 1.1, 0.01)
 sensitivity = st.sidebar.slider("Sensibilidad de Voz", 0.1, 0.9, 0.3, 0.05)
 smoothness = st.sidebar.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
 
-# Solución definitiva para FFmpeg
-def install_ffmpeg():
-    """Instala FFmpeg en el entorno de Streamlit Cloud"""
+def analyze_audio(audio_bytes):
+    """Analiza el audio directamente desde bytes usando librosa"""
     try:
-        st.info("📥 Instalando FFmpeg... Esto puede tomar 1 minuto")
-        start_time = time.time()
-        
-        # Instalar FFmpeg usando apt-get
-        result = subprocess.run(
-            ['apt-get', 'update'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        result = subprocess.run(
-            ['apt-get', '-y', 'install', 'ffmpeg'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # Verificar instalación
-        result = subprocess.run(
-            ['ffmpeg', '-version'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        if "ffmpeg version" in result.stdout:
-            st.success(f"✅ FFmpeg instalado correctamente en {time.time()-start_time:.1f} segundos")
-            return True
-        else:
-            st.error(f"❌ Error instalando FFmpeg: {result.stderr}")
-            return False
-            
-    except Exception as e:
-        st.error(f"❌ Error crítico: {str(e)}")
-        return False
-
-# Verificar e instalar FFmpeg si es necesario
-if not os.path.exists('/usr/bin/ffmpeg'):
-    if install_ffmpeg():
-        st.experimental_rerun()  # Reiniciar la app después de instalar
-    else:
-        st.error("No se pudo instalar FFmpeg. La aplicación no funcionará correctamente.")
-        st.stop()
-
-def analyze_audio(audio_path):
-    """Analiza el audio usando librosa"""
-    try:
-        # Cargar audio con librosa
-        y, sr = librosa.load(audio_path, sr=16000, mono=True)
+        # Convertir bytes a array de audio con librosa
+        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000, mono=True)
         
         # Calcular volumen
         volume = np.abs(y)
-        volume = volume / np.max(volume)
+        if np.max(volume) > 0:
+            volume = volume / np.max(volume)
+        else:
+            volume = np.zeros_like(volume)
         
         # Detectar voz
         is_speech = volume > sensitivity
@@ -114,11 +67,11 @@ def analyze_audio(audio_path):
         st.error(f"Error en análisis de audio: {str(e)}")
         return [1.0] * 100  # Perfil de zoom plano como respaldo
 
-def process_video(input_path, output_path, zoom_profile):
-    """Procesa el video con el perfil de zoom usando moviepy"""
+def process_video(video_path, output_path, zoom_profile):
+    """Procesa el video con el perfil de zoom"""
     try:
         # Cargar video
-        clip = VideoFileClip(input_path)
+        clip = VideoFileClip(video_path)
         
         # Calcular frames por segundo del perfil de zoom
         zoom_fps = len(zoom_profile) / clip.duration
@@ -157,77 +110,83 @@ def process_video(input_path, output_path, zoom_profile):
         st.error(f"Error en procesamiento de video: {str(e)}")
         return False
 
-def extract_audio(input_path, output_path):
-    """Extrae audio usando moviepy para evitar problemas con ffmpeg"""
+def extract_audio_from_video(video_bytes):
+    """Extrae audio directamente desde los bytes del video usando Pydub"""
     try:
-        from moviepy.audio.io.AudioFileClip import AudioFileClip
-        audio_clip = AudioFileClip(input_path)
-        audio_clip.write_audiofile(
-            output_path, 
-            fps=16000, 
-            ffmpeg_params=['-ac', '1']  # Mono
-        )
-        audio_clip.close()
-        return True
+        # Crear archivo temporal en memoria
+        video_file = io.BytesIO(video_bytes)
+        video_file.name = "temp_video.mp4"
+        
+        # Cargar video con Pydub
+        audio = AudioSegment.from_file(video_file, format="mp4")
+        
+        # Convertir a mono y 16kHz
+        audio = audio.set_channels(1).set_frame_rate(16000)
+        
+        # Exportar a bytes
+        audio_bytes = io.BytesIO()
+        audio.export(audio_bytes, format="wav")
+        
+        return audio_bytes.getvalue()
+        
     except Exception as e:
         st.error(f"Error extrayendo audio: {str(e)}")
-        return False
+        return None
 
 if uploaded_file is not None:
     # Mostrar video subido
     st.video(uploaded_file)
     
     if st.button("✨ Aplicar Zoom Automático", type="primary", use_container_width=True):
+        start_time = time.time()
+        
         with st.spinner('Procesando tu video... Esto puede tardar varios minutos'):
-            # Crear archivos temporales
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
-                tmp_video.write(uploaded_file.getvalue())
-                input_path = tmp_video.name
+            # Leer el contenido del archivo subido
+            video_bytes = uploaded_file.getvalue()
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
-                audio_path = tmp_audio.name
+            # Paso 1: Extraer audio directamente desde bytes
+            audio_bytes = extract_audio_from_video(video_bytes)
             
-            # Extraer audio usando moviepy
-            if not extract_audio(input_path, audio_path):
-                os.unlink(input_path)
-                if os.path.exists(audio_path):
-                    os.unlink(audio_path)
+            if audio_bytes is None:
+                st.error("Error al extraer audio del video")
                 st.stop()
             
-            # Procesar
-            try:
-                # Analizar audio
-                zoom_profile = analyze_audio(audio_path)
+            # Paso 2: Analizar audio
+            zoom_profile = analyze_audio(audio_bytes)
+            
+            # Crear archivo temporal para video
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+                tmp_video.write(video_bytes)
+                input_path = tmp_video.name
+            
+            # Paso 3: Procesar video
+            output_path = "procesado_" + uploaded_file.name
+            success = process_video(input_path, output_path, zoom_profile)
+            
+            if success:
+                processing_time = time.time() - start_time
+                st.success(f"✅ ¡Video procesado con éxito en {processing_time:.1f} segundos!")
                 
-                # Procesar video
-                output_path = "procesado_" + uploaded_file.name
-                success = process_video(input_path, output_path, zoom_profile)
+                # Mostrar video resultante
+                st.video(output_path)
                 
-                if success:
-                    st.success("✅ ¡Video procesado con éxito!")
-                    
-                    # Mostrar video resultante
-                    st.video(output_path)
-                    
-                    # Botón de descarga
-                    with open(output_path, "rb") as f:
-                        st.download_button(
-                            "⬇️ Descargar Video Procesado",
-                            f,
-                            file_name=output_path,
-                            mime="video/mp4"
-                        )
-                else:
-                    st.error("Error procesando el video. Intenta con otro archivo.")
-                    
-            finally:
-                # Limpiar archivos temporales
-                os.unlink(input_path)
-                os.unlink(audio_path)
-                if os.path.exists(output_path):
-                    os.unlink(output_path)
+                # Botón de descarga
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        "⬇️ Descargar Video Procesado",
+                        f,
+                        file_name=output_path,
+                        mime="video/mp4"
+                    )
+            else:
+                st.error("Error procesando el video. Intenta con otro archivo.")
+            
+            # Limpiar archivos temporales
+            os.unlink(input_path)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v5.0 | Herramienta para creadores de contenido")
+st.caption("AutoZoom Pro v7.0 | Herramienta para creadores de contenido")
 st.caption("© 2024 - Zoom automático basado en análisis de voz")
