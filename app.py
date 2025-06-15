@@ -1,135 +1,176 @@
-import os
-import subprocess
-
-# Instalar dependencias del sistema
-if not os.path.exists('/usr/bin/ffmpeg'):
-    subprocess.run(['apt-get', 'update'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(['apt-get', '-y', 'install', 'ffmpeg'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-# Solución para pyaudioop
-try:
-    import pyaudioop
-except ImportError:
-    subprocess.run(['pip', 'install', 'pyaudioop==0.1.0'])
-    import streamlit as st
+import streamlit as st
 import numpy as np
 import subprocess
 import tempfile
 import os
-from pydub import AudioSegment
+import librosa
+import soundfile as sf
 from moviepy.editor import VideoFileClip
+import warnings
 
+# Configurar página
 st.set_page_config(page_title="AutoZoom Pro", page_icon="🎬", layout="wide")
+st.title("🎬 AutoZoom Pro - Zoom Automático para Videos")
+st.subheader("Sube tu video y la herramienta aplicará zooms profesionales automáticamente")
 
-# Configuración inicial
-st.title("🎬 AutoZoom Pro")
-st.subheader("Zoom automático basado en tu voz - Para creadores de contenido")
-st.markdown("Sube tu video en primera persona y la herramienta aplicará zooms profesionales automáticamente")
+# Instalar FFmpeg automáticamente
+if not os.path.exists('/usr/bin/ffmpeg'):
+    import subprocess
+    st.info("Instalando FFmpeg... Esto puede tomar 1 minuto")
+    subprocess.run(['apt-get', 'update'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['apt-get', '-y', 'install', 'ffmpeg'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# Ocultar warnings
+warnings.filterwarnings("ignore")
 
 # Subida de archivos
-uploaded_file = st.file_uploader("Sube tu video MP4", type=["mp4"])
+uploaded_file = st.file_uploader("Sube tu video MP4", type=["mp4"], accept_multiple_files=False)
 
 # Parámetros ajustables
-st.sidebar.header("Configuración de Zoom")
-zoom_intensity = st.sidebar.slider("Intensidad del Zoom", 1.0, 1.3, 1.1, 0.01)
+st.sidebar.header("⚙️ Configuración de Zoom")
+zoom_intensity = st.sidebar.slider("Intensidad del Zoom", 1.0, 1.5, 1.1, 0.01)
 sensitivity = st.sidebar.slider("Sensibilidad de Voz", 0.1, 0.9, 0.3, 0.05)
+smoothness = st.sidebar.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
 
 def analyze_audio(audio_path):
-    audio = AudioSegment.from_file(audio_path)
-    audio.export("temp_audio.wav", format="wav")
-    
-    # Leer audio
-    sample_rate, data = np.memmap("temp_audio.wav", dtype='h', mode='r', offset=44)
-    
-    # Calcular volumen
-    volume = np.abs(data).astype(float)
-    volume = volume / np.max(volume)
-    
-    # Detectar voz
-    is_speech = volume > sensitivity
-    
-    # Calcular zoom
-    zoom_points = []
-    current_zoom = 1.0
-    for i in range(0, len(is_speech), 1000):
-        window = is_speech[i:i+1000]
-        if len(window) == 0: continue
-            
-        if np.mean(window) > 0.3:  # Segmento con voz
-            current_zoom = max(zoom_intensity, min(current_zoom + 0.02, zoom_intensity + 0.1))
-        else:  # Silencio
-            current_zoom = min(1.0, max(current_zoom - 0.02, zoom_intensity))
-        zoom_points.append(current_zoom)
-    
-    os.remove("temp_audio.wav")
-    return zoom_points
+    """Analiza el audio usando librosa en lugar de pydub"""
+    try:
+        # Cargar audio con librosa
+        y, sr = librosa.load(audio_path, sr=16000, mono=True)
+        
+        # Calcular volumen
+        volume = np.abs(y)
+        volume = volume / np.max(volume)
+        
+        # Detectar voz
+        is_speech = volume > sensitivity
+        
+        # Calcular puntos de zoom con suavizado
+        zoom_points = []
+        current_zoom = 1.0
+        
+        # Tamaño de ventana basado en la suavidad
+        window_size = max(100, int(5000 * smoothness))
+        
+        for i in range(0, len(is_speech), window_size):
+            window = is_speech[i:i+window_size]
+            if len(window) == 0:
+                continue
+                
+            if np.mean(window) > 0.3:  # Segmento con voz
+                current_zoom = min(zoom_intensity, current_zoom + 0.02 * (1/smoothness))
+            else:  # Silencio
+                current_zoom = max(1.0, current_zoom - 0.02 * (1/smoothness))
+                
+            zoom_points.append(current_zoom)
+        
+        return zoom_points
+        
+    except Exception as e:
+        st.error(f"Error en análisis de audio: {str(e)}")
+        return [1.0] * 100  # Perfil de zoom plano como respaldo
 
-def process_video(input_path, output_path):
-    # Extraer audio
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_audio:
-        temp_audio_path = tmp_audio.name
-    
-    subprocess.run(['ffmpeg', '-y', '-i', input_path, '-q:a', '0', '-map', 'a', temp_audio_path], check=True)
-    
-    # Analizar audio
-    zoom_profile = analyze_audio(temp_audio_path)
-    os.remove(temp_audio_path)
-    
-    # Procesar video
-    clip = VideoFileClip(input_path)
-    
-    # Función de zoom
-    def zoom_effect(get_frame, t):
-        frame_index = min(int(t * 10), len(zoom_profile)-1)
-        zoom_level = zoom_profile[frame_index]
-        frame = get_frame(t)
-        return frame * zoom_level
-    
-    zoom_clip = clip.fl(zoom_effect, apply_to=['mask'])
-    
-    # Exportar
-    zoom_clip.write_videofile(
-        output_path,
-        codec='libx264',
-        audio_codec='aac',
-        fps=clip.fps,
-        threads=4,
-        preset='fast',
-        logger=None
-    )
-    clip.close()
+def process_video(input_path, output_path, zoom_profile):
+    """Procesa el video con el perfil de zoom"""
+    try:
+        # Cargar video
+        clip = VideoFileClip(input_path)
+        
+        # Calcular frames por segundo del perfil de zoom
+        zoom_fps = len(zoom_profile) / clip.duration
+        
+        # Función para aplicar zoom
+        def make_frame(get_frame, t):
+            try:
+                # Obtener nivel de zoom para este tiempo
+                idx = min(int(t * zoom_fps), len(zoom_profile)-1)
+                zoom_level = zoom_profile[idx]
+                
+                # Aplicar zoom
+                frame = get_frame(t)
+                return frame * zoom_level
+            except:
+                return get_frame(t)  # Respaldar al frame original
+            
+        # Aplicar efecto
+        zoom_clip = clip.fl(lambda gf, t: make_frame(gf, t), apply_to=['video'])
+        
+        # Escribir video de salida
+        zoom_clip.write_videofile(
+            output_path,
+            codec='libx264',
+            audio_codec='aac',
+            fps=clip.fps,
+            threads=4,
+            preset='fast',
+            logger=None
+        )
+        
+        clip.close()
+        return True
+        
+    except Exception as e:
+        st.error(f"Error en procesamiento de video: {str(e)}")
+        return False
 
 if uploaded_file is not None:
+    # Mostrar video subido
     st.video(uploaded_file)
     
-    if st.button("✨ Aplicar Zoom Automático", type="primary"):
-        with st.spinner('Procesando... esto puede tardar unos minutos'):
-            # Guardar archivo temporal
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                input_path = tmp_file.name
+    if st.button("✨ Aplicar Zoom Automático", type="primary", use_container_width=True):
+        with st.spinner('Procesando tu video... Esto puede tardar varios minutos'):
+            # Crear archivos temporales
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+                tmp_video.write(uploaded_file.getvalue())
+                input_path = tmp_video.name
             
-            output_path = "procesado_" + uploaded_file.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
+                audio_path = tmp_audio.name
+            
+            # Extraer audio del video
+            try:
+                subprocess.run([
+                    'ffmpeg', '-y', '-i', input_path,
+                    '-ac', '1', '-ar', '16000', audio_path
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            except Exception as e:
+                st.error(f"Error extrayendo audio: {str(e)}")
+                os.unlink(input_path)
+                os.unlink(audio_path)
+                st.stop()
             
             # Procesar
-            process_video(input_path, output_path)
-            
-            # Mostrar resultado
-            st.success("¡Video procesado con éxito!")
-            st.video(output_path)
-            
-            # Descargar
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    label="⬇️ Descargar Video",
-                    data=f,
-                    file_name=output_path,
-                    mime="video/mp4"
-                )
-            
-            # Limpiar
-            os.unlink(input_path)
-            os.unlink(output_path)
+            try:
+                # Analizar audio
+                zoom_profile = analyze_audio(audio_path)
+                
+                # Procesar video
+                output_path = "procesado_" + uploaded_file.name
+                success = process_video(input_path, output_path, zoom_profile)
+                
+                if success:
+                    st.success("✅ ¡Video procesado con éxito!")
+                    st.video(output_path)
+                    
+                    # Botón de descarga
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            "⬇️ Descargar Video Procesado",
+                            f,
+                            file_name=output_path,
+                            mime="video/mp4"
+                        )
+                else:
+                    st.error("Error procesando el video. Intenta con otro archivo.")
+                    
+            finally:
+                # Limpiar archivos temporales
+                os.unlink(input_path)
+                os.unlink(audio_path)
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
 
+# Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v1.0 | Para creadores de contenido")
+st.caption("AutoZoom Pro v2.0 | Herramienta para creadores de contenido")
+st.caption("© 2024 - Zoom automático basado en análisis de voz")
