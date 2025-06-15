@@ -7,18 +7,12 @@ import librosa
 import soundfile as sf
 from moviepy.editor import VideoFileClip
 import warnings
+import ffmpeg  # Importamos ffmpeg-python
 
 # Configurar página
 st.set_page_config(page_title="AutoZoom Pro", page_icon="🎬", layout="wide")
 st.title("🎬 AutoZoom Pro - Zoom Automático para Videos")
 st.subheader("Sube tu video y la herramienta aplicará zooms profesionales automáticamente")
-
-# Instalar FFmpeg automáticamente
-if not os.path.exists('/usr/bin/ffmpeg'):
-    import subprocess
-    st.info("Instalando FFmpeg... Esto puede tomar 1 minuto")
-    subprocess.run(['apt-get', 'update'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(['apt-get', '-y', 'install', 'ffmpeg'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # Ocultar warnings
 warnings.filterwarnings("ignore")
@@ -33,7 +27,7 @@ sensitivity = st.sidebar.slider("Sensibilidad de Voz", 0.1, 0.9, 0.3, 0.05)
 smoothness = st.sidebar.slider("Suavidad", 0.1, 1.0, 0.5, 0.05)
 
 def analyze_audio(audio_path):
-    """Analiza el audio usando librosa en lugar de pydub"""
+    """Analiza el audio usando librosa"""
     try:
         # Cargar audio con librosa
         y, sr = librosa.load(audio_path, sr=16000, mono=True)
@@ -127,16 +121,26 @@ if uploaded_file is not None:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
                 audio_path = tmp_audio.name
             
-            # Extraer audio del video
+            # Extraer audio del video usando ffmpeg-python
             try:
-                subprocess.run([
-                    'ffmpeg', '-y', '-i', input_path,
-                    '-ac', '1', '-ar', '16000', audio_path
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            except Exception as e:
-                st.error(f"Error extrayendo audio: {str(e)}")
+                # Usamos ffmpeg-python en lugar de subprocess
+                (
+                    ffmpeg
+                    .input(input_path)
+                    .output(audio_path, ac=1, ar='16000')
+                    .run(quiet=True, overwrite_output=True)
+                )
+            except ffmpeg.Error as e:
+                st.error(f"Error extrayendo audio: {str(e.stderr.decode('utf8'))}")
                 os.unlink(input_path)
-                os.unlink(audio_path)
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+                st.stop()
+            except Exception as e:
+                st.error(f"Error inesperado: {str(e)}")
+                os.unlink(input_path)
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
                 st.stop()
             
             # Procesar
@@ -172,5 +176,5 @@ if uploaded_file is not None:
 
 # Pie de página
 st.markdown("---")
-st.caption("AutoZoom Pro v2.0 | Herramienta para creadores de contenido")
+st.caption("AutoZoom Pro v3.0 | Herramienta para creadores de contenido")
 st.caption("© 2024 - Zoom automático basado en análisis de voz")
